@@ -5,13 +5,86 @@
 #include <errno.h>
 #include <ctype.h>
 #include <stdarg.h>
+#include <time.h>
 
 double var_list[100];
 FILE *infp, *outfp;
 int finished = 0;
 char infn[1024];
 char outfn[1024];
-int line_number = 1;
+char progname[1024];
+int line_number = 0;
+int expression_count = 0;
+int verbose_flag = 0;
+int deparam_flag = 0;
+int swap_flag = 0;
+
+char *help_text[] = {
+    "",
+    "Pre-process a g-code file",
+    "",
+    "Required parameters:",
+    "  -i <input file name>",
+    "  -o <output file name>",
+    "",
+    "One or more of these flags may be used:",
+    "  -d de-parameterize the input file",
+    //"  -s swap the x and the y axis",
+    "  -v verbose operation",
+    "  -h show this help text and do nothing",
+    "",
+    "Example:",
+    "  deparam -vd -i input.nc -o output.nc",
+    "  This command will verbosely remove the parameters",
+    "  from the input file and write the result to the",
+    "  output file.",
+    "",
+    NULL
+};
+
+/*
+    Create a string with the time without the stupid '\n' that
+    ctime() puts in.
+*/
+static inline const char* get_time(void) {
+    
+    static char str[100];
+    char *strp;
+    time_t t = time(NULL);
+
+    memset(str, 0, sizeof(str));
+    ctime_r(&t, str);
+    if(NULL != (strp = strrchr(str, '\n')))
+        *strp = 0;
+
+    return str;
+}
+
+/*
+    Show a message if verbosity is enabled.
+*/
+void show_msg(const char* fmt, ...) {
+    va_list args;
+
+    if(verbose_flag) {
+        va_start(args, fmt);
+        vfprintf(stdout, fmt, args);
+        va_end(args);
+        fprintf(stdout, "\n");
+        fflush(stdout);
+    }
+}
+
+void show_warning(const char* fmt, ...) {
+    va_list args;
+
+    fprintf(stderr, "%s: warning: ", progname);
+    va_start(args, fmt);
+    vfprintf(stdout, fmt, args);
+    va_end(args);
+    fprintf(stdout, "\n");
+    fflush(stdout);
+}
 
 /*
     Display an error and abort the program.
@@ -19,7 +92,7 @@ int line_number = 1;
 void show_error(const char* fmt, ...) {
     va_list args;
 
-    fprintf(stderr, "error: %s: %d: ", infn, line_number);
+    fprintf(stderr, "%s: error: %d: ", progname, line_number);
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
     va_end(args);
@@ -101,6 +174,7 @@ double get_number(void) {
     int idx = 0;
     int ch;
         
+    memset(str, 0, sizeof(str));
     for(idx = 0, ch = get_char(); isdigit(ch) || ch == '.' || ch == '-'; idx++, ch = get_char()) {
         str[idx] = ch;
         if(idx > sizeof(str)-2) 
@@ -129,9 +203,15 @@ double get_number(void) {
 void do_the_expression(void) {
 
     int ch;
-    double num;
+    double num = 0.0;
     int var_val;
 
+    if(!deparam_flag) {
+        fputc('[', outfp);
+        return;
+    }
+
+    expression_count++;
     // if the next character is a '-' or isdigit() then it's a number,
     // else if it is a '#', then it's a var. Otherwise, it's an error.
     skip_ws();
@@ -200,6 +280,11 @@ void do_the_definition(void) {
     int ch;
     double num;
 
+    if(!deparam_flag) {
+        fputc('#', outfp);
+        return;
+    }
+
     // get one or two digits.
     index = get_var_number();
     skip_ws();
@@ -216,31 +301,121 @@ void do_the_definition(void) {
 }
 
 /*
+    Show the help text and exit.
+*/
+void show_help(void) {
+
+    int i;
+
+    for(i = 0; help_text[i] != NULL; i++)
+        printf("%s\n", help_text[i]);
+}
+
+/*
+    Parse the command line.
+    Accepted parameters:
+    -i input file name (required)
+    -o output file name (required)
+    -d deparameterize the input
+    //-s swap the x and y axis
+    -v verbose operation
+    -h show help
+    If neither -d or -s are present, then a simple copy is made.
+*/
+void cmd_line(int argc, char** argv) {
+
+    int i, j;
+    int found_inf = 0, found_outf = 0;
+
+    strncpy(progname, argv[0], sizeof(progname));
+    if(argc < 2) {
+        strncpy(infn, "none", sizeof(infn));
+        show_help();
+        show_error("nothing to do!");
+    }
+
+    i = 1;
+    j = 0;
+    while(1) {
+        if(i >= argc)
+            break;
+
+        switch(argv[i][j]) {
+            case '-':
+                j = 1;
+                break; // continue and do nothing
+            case 'v':
+                verbose_flag++;
+                j++;
+                break;
+            case 'd':
+                deparam_flag++;
+                j++;
+                break;
+            //case 's':
+            //    //swap_flag++;
+            //    show_warning("swapping is broken/disabled");
+            //    j++;
+            //    break;
+            case 'h':
+                show_help();
+                exit(0);
+                break;  // keep the compiler happy
+            case 'i':
+                i++;
+                strncpy(infn, argv[i], sizeof(infn));
+                j = 0;
+                found_inf++;
+                i++;
+                break;
+            case 'o':
+                i++;
+                strncpy(outfn, argv[i], sizeof(outfn));
+                j = 0;
+                found_outf++;
+                i++;
+                break;
+            case 0: // end of this parameter
+                j = 0; 
+                i++;
+                break;
+            default:
+                show_help();
+                show_error("command line error at \'%c\'", argv[i][j]);
+                break; // keep the compiler happy
+        }
+    }
+
+    if(!found_inf || !found_outf) {
+        show_help();
+        show_error("both input and output files must be specified");
+    }
+
+    if(!deparam_flag && !swap_flag) {
+        show_warning("no flags set; copy only");
+    }
+}
+
+/*
     Main function. Handle file iopening and closing, etc.
 */
 int main(int argc, char** argv) {
 
-    if(argc > 1) {
-        strncpy(infn, argv[1], sizeof(infn));
-        printf("opening input file: %s\n", infn);
-        if(NULL == (infp = fopen(infn, "r"))) {
-            fprintf(stderr, "error: cannot open input file: %s: %s\n", infn, strerror(errno));
-            return(1);
-        }
-    }
-    else {
-        fprintf(stderr, "error: input file needed.\n");
-        return(1);
-    }
+    cmd_line(argc, argv);
 
-    strncpy(outfn, infn, sizeof(outfn));
-    strncat(outfn, ".nc", sizeof(outfn));
-    printf("opening output file: %s\n", infn);
-    if(NULL == (outfp = fopen(outfn, "w"))) {
-        fprintf(stderr, "error: cannot open output file: %s: %s\n", outfn, strerror(errno));
-        fclose(infp);
-        return(1);
-    }
+    memset(var_list, 0, sizeof(var_list));
+    show_msg("opening input file: %s", infn);
+    if(NULL == (infp = fopen(infn, "r"))) 
+        show_error("cannot open input file: %s: %s\n", infn, strerror(errno));
+
+    show_msg("opening output file: %s", outfn);
+    if(NULL == (outfp = fopen(outfn, "w"))) 
+        show_error("cannot open output file: %s: %s\n", outfn, strerror(errno));
+
+    line_number++;
+    fprintf(outfp, "(input file: %s processed by deparam on: %s)\n", infn, get_time());
+    fprintf(outfp, "(de-paramaterize: %s)\n", (deparam_flag)? "YES":"NO");
+    fprintf(outfp, "(swap x/y: %s)\n", (swap_flag)? "YES":"NO");
 
     while(1) {
         int ch = get_char();
@@ -249,18 +424,44 @@ int main(int argc, char** argv) {
             break;
         }
 
-        if(ch == '[') {
-            do_the_expression();
-        }
-        else if(ch == '#') {
-            do_the_definition();
-        }
-        else {
-            fputc(ch, outfp);
+        switch(ch) {
+            case '[':
+                do_the_expression();
+                break;
+            case '#':
+                do_the_definition();
+                break;
+            /*
+            case 'X':
+            case 'x':
+                if(swap_flag)
+                    fputc('Y', outfp);
+                else
+                    fputc('X', outfp);
+                break;
+            case 'Y':
+            case 'y':
+                if(swap_flag)
+                    fputc('X', outfp);
+                else
+                    fputc('Y', outfp);
+                break;
+            */
+            default:
+                fputc(ch, outfp);
+                break;
         }
     }
 
     fclose(infp);
     fclose(outfp);
+    show_msg("%d lines, %d expressions", line_number-1, expression_count);
     return(0);
 }
+
+/*
+    TODO: Swapping is broken. In order to get it working, it will be nessessary 
+    to swap the objects on the line instead of just swapping the letters. 
+    Apparently, at least for Camotics, the order in which the X and Y appear is
+    significant.
+*/
