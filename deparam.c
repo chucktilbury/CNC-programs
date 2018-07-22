@@ -464,4 +464,8 @@ int main(int argc, char** argv) {
     to swap the objects on the line instead of just swapping the letters. 
     Apparently, at least for Camotics, the order in which the X and Y appear is
     significant.
+
+    In order to get X/Y swapping to work, I am going to need to refactor most of 
+    the code. Instead of loading it character-by-character, I will need to do it
+    line-by-line and do all of the processing on the line before writing it out.
 */
